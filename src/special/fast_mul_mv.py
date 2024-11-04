@@ -90,7 +90,3 @@ def fast_bbtmv_mul(col_arr: npt.NDArray[np.complex128],
     circulant_tensor = np.fft.ifft(circulant_tensor)
 
     return circulant_tensor[:n, :m, :k]
-
-
-if __name__ == "__main__":
-    __test_matrix()
