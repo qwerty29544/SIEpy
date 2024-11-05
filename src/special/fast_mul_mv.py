@@ -90,3 +90,36 @@ def fast_bbtmv_mul(col_arr: npt.NDArray[np.complex128],
     circulant_tensor = np.fft.ifft(circulant_tensor)
 
     return circulant_tensor[:n, :m, :k]
+
+
+def prep_fftbbtensor(col_arr: npt.NDArray[np.complex128],
+                     row_arr: npt.NDArray[np.complex128],
+                     n: int, m: int, k: int) -> npt.NDArray[np.complex128]:
+    """
+
+    """
+    circulant_tensor = np.zeros((2 * n, 2 * m, 2 * k)) + 0.0j
+    col_arr = col_arr.reshape((n, m, k))
+    row_arr = row_arr.reshape((n, m, k))
+    circulant_tensor[:n, :m, :k] = row_arr[:n, :m, :k]
+    circulant_tensor[n + 1:2 * n, :m, :k] = col_arr[n:0:-1, :m, :k]
+    circulant_tensor[:n, m + 1:2 * m, :k] = col_arr[:n, m:0:-1, :k]
+    circulant_tensor[:n, :m, k + 1: 2 * k] = col_arr[:n, :m, k:0:-1]
+    circulant_tensor[n + 1:2 * n, m + 1:2 * m, :k] = col_arr[n:0:-1, m:0:-1, :k]
+    circulant_tensor[:n, m + 1:2 * m, k + 1:2 * k] = col_arr[:n, m:0:-1, k:0:-1]
+    circulant_tensor[n + 1:2 * n, :m, k + 1:2 * k] = col_arr[n:0:-1, :m, k:0:-1]
+    circulant_tensor[n + 1:2 * n, m + 1:2 * m, k + 1:2 * k] = col_arr[n:0:-1, m:0:-1, k:0:-1]
+    circulant_tensor = np.fft.fftn(circulant_tensor)
+    return circulant_tensor
+
+
+def prep_fbbtmv(prep_fft_arr: npt.NDArray[np.complex128],
+                vec_arr: npt.NDArray[np.complex128],
+                n: int, m: int, k: int) -> npt.NDArray[np.complex128]:
+    """
+
+    """
+    x_arr = np.zeros((2 * n, 2 * m, 2 * k)) + 0.0j
+    x_arr[:n, :m, :k] = vec_arr[:n, :m, :k]
+    prep_fft_arr = np.fft.ifft(prep_fft_arr * np.fft.fftn(x_arr))
+    return prep_fft_arr[:n, :m, :k]
