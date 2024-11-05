@@ -6,4 +6,4 @@ def wave3d(x,
            amplitude=np.array([1.0, 0.0, 0.0]),
            direction=np.array([1.0, 0.0, 0.0]),
            sign=-1):
-    return amplitude * np.exp(sign * 1j * x.dot(k_0 * direction))
+    return amplitude.reshape(-1, 3) * np.exp(sign * 1j * x.dot(k_0 * direction).reshape(-1, 1))

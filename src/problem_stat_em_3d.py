@@ -1,7 +1,12 @@
 import numpy as np
 from volume.dielectric import apply_dielectric_3d
 from volume.kernel import helm3d_kernel
+from volume.wave import wave3d
 from special.fast_mul_mv import prep_fbbtmv, prep_fftbbtensor
+from special.utils import save_np_file_txt
+from special.hull2d import ConvexHull
+from special.spectre_params import find_params
+import os
 
 
 def init_grid(x1_bound=None,
@@ -51,15 +56,142 @@ def init_operator(grid, volume, discret, distance, k, eps, kernel):
     result = gr.reshape(-1, 1, 1) * (part_1 + part_2) * volume.reshape(-1, 1)
     eps = eps - np.eye(3).reshape(-1, 3, 3)
     result = np.einsum("...ij,...jk->...ik", result, eps)
-    result[0, :] = -1/3 * np.eye(3)
+    result[0, :] = -1 / 3 * np.eye(3)
     return result
 
 
 def operator(operator_array, vector_array, n, m, k):
     result = np.zeros((n * m * k, 3)) + 0.0j
-    operator_array = operator_array.reshape(-1, 9)
-    result[:, 0] += 0
-    return vector_array
+    for col in range(3):
+        res = prep_fbbtmv(prep_fft_arr=operator_array[:, col].reshape((2 * n, 2 * m, 2 * k)),
+                          vec_arr=vector_array[:, col].reshape((n, m, k)),
+                          n=n, m=m, k=k).reshape((-1,))
+        result[:, 0] += res
+    for col in range(3):
+        result[:, 1] += prep_fbbtmv(prep_fft_arr=operator_array[:, 3 + col].reshape((2 * n, 2 * m, 2 * k)),
+                                    vec_arr=vector_array[:, col].reshape((n, m, k)),
+                                    n=n, m=m, k=k).reshape((-1,))
+    for col in range(3):
+        result[:, 2] += prep_fbbtmv(prep_fft_arr=operator_array[:, 6 + col].reshape((2 * n, 2 * m, 2 * k)),
+                                    vec_arr=vector_array[:, col].reshape((n, m, k)),
+                                    n=n, m=m, k=k).reshape((-1,))
+    result = vector_array - result
+    return result
+
+
+def GIM_EM3dprep(prep_oper_array, vec_array, u0_array=None,
+                 mu_0=None, n=None, m=None, k=None, rtol=1e-8, max_iter=1000):
+    if n is None:
+        n = 10
+    if m is None:
+        m = 10
+    if k is None:
+        k = 10
+    if mu_0 is None:
+        mu_0 = 1.0 + 0.0j
+    if u0_array is None:
+        u = np.ones((n * m * k, 3), dtype=np.complex128)
+    else:
+        u = u0_array.astype(np.complex128).copy()
+
+    rel_error_list = []
+    residual_list = []
+    f_norm = np.linalg.norm(np.linalg.norm(vec_array, axis=1))
+
+    for iter in range(max_iter):
+        resid = operator(prep_oper_array, u, n, m, k) - vec_array
+        u = u - resid / mu_0
+
+        rel_error = np.linalg.norm(np.linalg.norm(u - u0_array, axis=1)) / f_norm
+        rel_error_list.append(rel_error)
+        residual = np.linalg.norm(np.linalg.norm(resid, axis=1))
+        residual_list.append(residual)
+        print(f"iter {iter},\t rel_error is {round(rel_error, 8)}, \t system residual is {round(residual, 8)}")
+        if rel_error < rtol:
+            break
+        u0_array = u.copy()
+
+    return u, rel_error_list, residual_list
+
+
+def BiCGStab_EM3dprep(prep_oper_array, vec_array, u0_array=None,
+                      n=None, m=None, k=None,
+                      rtol=1e-8, max_iter=1000):
+    """
+
+    :param prep_oper_array: известная матрица A оператора размера (N, N), состоящая из комплексных чисел
+    :param vec_array: известный вектор f для правой части системы уравнений размера (N,), состоящий из комплексных чисел
+    :param u0_array: начальное приближение u0 в качестве начальной точки итерационного метода размера (N,) со значением None по умолчанию. Если передан None, то создавать вектор нужного размера из единиц
+    :param n:
+    :param m:
+    :param k:
+    :param rtol: относительная ошибка нормы разницы итераций поделенная на норму вектора f, обозначаемый rtol как критерий остановки алгоритма, по умолчанию равный 10е-8
+    :param max_iter: максимальное количество итерационных шагов max_iter как критерий остановки алгоритма, по умолчанию равный 1000
+    :return:
+    """
+
+    if n is None:
+        n = 10
+    if m is None:
+        m = 10
+    if k is None:
+        k = 10
+    if u0_array is None:
+        u = np.ones((n * m * k, 3), dtype=np.complex128)
+    else:
+        u = u0_array.astype(np.complex128).copy()
+
+    r = vec_array - operator(prep_oper_array, u, n, m, k)
+    r_hat = r.copy()
+    rho_old = alpha = omega_old = 1 + 0j
+    v = np.zeros((n * m * k, 3), dtype=np.complex128)
+    p = np.zeros((n * m * k, 3), dtype=np.complex128)
+    rel_error_list = []
+    residual_list = []
+    f_norm = np.linalg.norm(np.linalg.norm(vec_array, axis=1))
+
+    for iter in range(max_iter):
+        rho_new = np.einsum('...ij,...ij', r_hat.conj(), r)
+        if rho_new == 0:
+            print("Breakdown: rho_new == 0")
+            break
+
+        if iter == 0:
+            p = r.copy()
+        else:
+            beta = (rho_new / rho_old) * (alpha / omega_old)
+            p = r + beta * (p - omega_old * v)
+
+        v = operator(prep_oper_array, p, n, m, k)
+        sigma = np.einsum('...ij,...ij', r_hat.conj(), v)
+        if sigma == 0:
+            print("Breakdown: sigma == 0")
+            break
+
+        alpha = rho_new / sigma
+        s = r - alpha * v
+        t = operator(prep_oper_array, s, n, m, k)
+        t_norm = np.einsum('...ij,...ij', t.conj(), t)
+        if t_norm == 0:
+            omega_new = 0
+        else:
+            omega_new = np.einsum('...ij,...ij', t.conj(), s) / t_norm
+
+        u0_array = u.copy()
+        u = u + alpha * p + omega_new * s
+
+        rel_error = np.linalg.norm(np.linalg.norm(u - u0_array, axis=1)) / f_norm
+        rel_error_list.append(rel_error)
+        residual = np.linalg.norm(np.linalg.norm(operator(prep_oper_array, u, n, m ,k) - vec_array, axis=1))
+        residual_list.append(residual)
+        print(f"iter {iter},\t rel_error is {round(rel_error, 8)}, \t system residual is {round(residual, 8)}")
+        if rel_error < rtol:
+            break
+
+        r = s - omega_new * t
+        rho_old = rho_new
+        omega_old = omega_new
+    return u, rel_error_list, residual_list
 
 
 class Em3dProblem:
@@ -80,9 +212,12 @@ class Em3dProblem:
         self.eps_on_grid = None  # Диэлектрическая проницаемость на сетке
         self.distance = None  # Массив расстояний от первой точки области до всех остальных
 
-        self.oper_coeffs = None  # Коэффициенты матрицы оператора
         self.prep_coeffs = None  # Подготовленные для быстрого умноженмя коэффициенты
-        self.f_values = None     # Значения внешней волны
+        self.f_values = None  # Значения внешней волны
+
+        self.result = None  # Массив решения задачи
+        self.resid = None   # Остатки невязки
+        self.rel_err_list = None    # Остатки на итерациях
 
     def fit(self, fit_config=None):
         if fit_config is None:
@@ -132,7 +267,12 @@ class Em3dProblem:
         self.k_0 = self.config.get("k_0")
         self.length = self.config.get("length")
         self.center = self.config.get("center")
-        self.direction = self.config.get("direction")
+        self.direction = np.array(self.config.get("direction"))
+        self.direction = self.direction / np.linalg.norm(self.direction)
+
+        self.path = os.path.join(self.path, self.exp_no)
+        if not os.path.isdir(self.path):
+            os.mkdir(self.path)
 
         bounds = np.array([(-np.array(self.length) / 2) + np.array(self.center),
                            (np.array(self.length) / 2) + np.array(self.center)])
@@ -149,37 +289,81 @@ class Em3dProblem:
         self.distance = np.zeros(np.prod(self.n))
         self.distance[1:] = np.linalg.norm(self.grid[0, :] - self.grid[1:, :], axis=1)
 
-        self.oper_coeffs = init_operator(grid=self.grid,
-                                         volume=self.volume,
-                                         discret=self.n,
-                                         distance=self.distance,
-                                         k=self.k_0,
-                                         eps=self.eps_on_grid,
-                                         kernel=helm3d_kernel).reshape((-1, 9))
+        oper_coeffs = init_operator(grid=self.grid,
+                                    volume=self.volume,
+                                    discret=self.n,
+                                    distance=self.distance,
+                                    k=self.k_0,
+                                    eps=self.eps_on_grid,
+                                    kernel=helm3d_kernel).reshape((-1, 9))
 
-        self.prep_coeffs = np.zeros((8*np.prod(self.n), 9)) + 0.0j
+        self.prep_coeffs = np.zeros((8 * np.prod(self.n), 9)) + 0.0j
         for rowcol in range(9):
-            self.prep_coeffs[:, rowcol] = prep_fftbbtensor(col_arr=self.oper_coeffs[:, rowcol],
-                                                           row_arr=self.oper_coeffs[:, rowcol],
+            self.prep_coeffs[:, rowcol] = prep_fftbbtensor(col_arr=oper_coeffs[:, rowcol],
+                                                           row_arr=oper_coeffs[:, rowcol],
                                                            n=int(self.n[0]),
                                                            m=int(self.n[1]),
-                                                           k=int(self.n[2])).reshape((8*np.prod(self.n),))
+                                                           k=int(self.n[2])).reshape((8 * np.prod(self.n),))
+
+        self.f_values = wave3d(x=self.grid,
+                               k_0=float(self.k_0),
+                               direction=np.array(self.direction),
+                               amplitude=np.array(self.amplitude))
 
         print("fit completed")
-        print(f"coeffs shape is: {self.oper_coeffs.shape}")
+        print(f"prep_coeffs shape is {self.prep_coeffs.shape}")
+        print(f"wave shape is {self.f_values.shape}")
         return self
+
+    def compute_BiCGStab(self, save=True):
+        print("BiCGStab method iterations:")
+        self.result, self.rel_err_list, self.resid = \
+            BiCGStab_EM3dprep(prep_oper_array=self.prep_coeffs,
+                              vec_array=self.f_values,
+                              u0_array=np.ones((np.prod(self.n), 3)) + 0.0j,
+                              n=self.n[0], m=self.n[1], k=self.n[2])
+        if save:
+            save_np_file_txt(np.array(self.result), os.path.join(self.path, "result_BiCGStab.txt"))
+            save_np_file_txt(np.array(self.rel_err_list), os.path.join(self.path, "rel_err_list_BiCGStab.txt"))
+            save_np_file_txt(np.array(self.resid), os.path.join(self.path, "resid_list_BiCGStab.txt"))
+            print(f"Results of iterations saved in {self.path}")
+
+        print("iterations is over")
+
+    def compute_GIM(self, mu_param=None, save=True):
+        if mu_param is None:
+            mu_param = 1.0 + 0.0j
+        print("GIM method iterations:")
+        self.result, self.rel_err_list, self.resid = \
+            GIM_EM3dprep(prep_oper_array=self.prep_coeffs,
+                         vec_array=self.f_values,
+                         u0_array=np.ones((np.prod(self.n), 3)) + 0.0j,
+                         mu_0=mu_param,
+                         n=self.n[0], m=self.n[1], k=self.n[2])
+        if save:
+            save_np_file_txt(np.array(self.result), os.path.join(self.path, "result_GIM.txt"))
+            save_np_file_txt(np.array(self.rel_err_list), os.path.join(self.path, "rel_err_list_GIM.txt"))
+            save_np_file_txt(np.array(self.resid), os.path.join(self.path, "resid_list_GIM.txt"))
+            print(f"Results of iterations saved in {self.path}")
+
+        print("iterations is over")
+
+    def compute_mu(self):
+        result = np.sort(np.unique(self.eps_on_grid))
+        mu_0, radius = find_params(1/3 * result + 2/3)
+        return mu_0, radius
 
 
 if __name__ == "__main__":
     config = {
-        "exp_no": "exp1",
-        "path": "output/",
-        "amplitude": [1.0, 0.0, 0.0],
-        "k_0": 1.0,
-        "n": [20, 30, 40],
+        "exp_no": "exp10",
+        "path": "C:\\Users\\qwert\\PycharmProjects\\SIEpy\\output",
+        "amplitude": [1.0, 1.0, 1.0],
+        "k_0": 0.5,
+        "n": [45, 45, 45],
         "length": [1.0, 1.0, 1.0],
         "center": [0.0, 0.0, 0.0],
-        "direction": [1.0, 0.0, 0.0],
+        "direction": [1.0, 1.0, 1.0],
         "eps": [
             {
                 "type": "step",
@@ -195,16 +379,20 @@ if __name__ == "__main__":
             },
             {
                 "type": "ellipsis",
-                "eps_real": [[1.0, 0.0, 0.0],
-                             [0.0, 1.0, 0.0],
-                             [0.0, 0.0, 1.0]],
-                "eps_imag": [[0.0, 0.0, 0.0],
-                             [0.0, 0.0, 0.0],
-                             [0.0, 0.0, 0.0]],
+                "eps_real": [[5.0, 0.0, 0.0],
+                             [0.0, 6.0, 0.0],
+                             [0.0, 0.0, 7.0]],
+                "eps_imag": [[1.5, 0.0, 0.0],
+                             [0.0, 2.5, 0.0],
+                             [0.0, 0.0, 0.5]],
                 "center": [0.0, 0.0, 0.0],
-                "radius": [1.0, 1.0, 1.0]
+                "radius": [0.5, 0.5, 0.5]
             }
         ]
     }
     test_obj = Em3dProblem()
     test_obj.fit(fit_config=config)
+    mu_0, R = test_obj.compute_mu()
+    test_obj.compute_BiCGStab()
+    test_obj.compute_GIM(mu_param=mu_0)
+

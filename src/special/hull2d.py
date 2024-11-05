@@ -44,7 +44,7 @@ def sequential_chain(points):
 
 def plot_hull(points, hull, **kwargs):
     points_color = "black" if kwargs.get("points_color") is None else kwargs.get("points_color")
-    points_alpha = 0.7 if kwargs.get("points_alpha") is None else points_alpha = kwargs.get("points_alpha")
+    points_alpha = 0.7 if kwargs.get("points_alpha") is None else kwargs.get("points_alpha")
     hull_color = "black" if kwargs.get("hull_color") is None else kwargs.get("hull_color")
     hull_marker = "x" if kwargs.get("hull_marker") is None else kwargs.get("hull_marker")
     hull_label = "Convex hull" if kwargs.get("hull_label") is None else kwargs.get("hull_label")
@@ -97,7 +97,7 @@ class ConvexHull:
     def plot_hull(self, jitter=False, **kwargs):
         # Params
         points_color = "black" if kwargs.get("points_color") is None else kwargs.get("points_color")
-        points_alpha = 0.7 if kwargs.get("points_alpha") is None else points_alpha = kwargs.get("points_alpha")
+        points_alpha = 0.7 if kwargs.get("points_alpha") is None else kwargs.get("points_alpha")
         hull_color = "black" if kwargs.get("hull_color") is None else kwargs.get("hull_color")
         hull_marker = "x" if kwargs.get("hull_marker") is None else kwargs.get("hull_marker")
         plt_figsize = (6, 6) if kwargs.get("plt_figsize") is None else kwargs.get("plt_figsize")
