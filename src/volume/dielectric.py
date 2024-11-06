@@ -24,7 +24,7 @@ def step_dielectric_3d(grid: npt.NDArray[np.float64],
     if x3_bounds is None:
         x3_bounds = [-1.0, 1.0]
 
-    eps = np.zeros((grid.shape[0], 3, 3)) + 0j
+    eps = np.zeros((grid.shape[0], 3, 3)) + 0.0j
     indexes = ((grid[:, 0] >= x1_bounds[0]) * (grid[:, 0] <= x1_bounds[1]) *
                (grid[:, 1] >= x2_bounds[0]) * (grid[:, 1] <= x2_bounds[1]) *
                (grid[:, 2] >= x3_bounds[0]) * (grid[:, 2] <= x3_bounds[1]))

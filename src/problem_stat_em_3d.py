@@ -1,11 +1,13 @@
+import matplotlib.pyplot as plt
 import numpy as np
 from volume.dielectric import apply_dielectric_3d
 from volume.kernel import helm3d_kernel
 from volume.wave import wave3d
-from special.fast_mul_mv import prep_fbbtmv, prep_fftbbtensor
+from special.fast_mul_mv import prep_fbbtmv, prep_fftbbtensor, fast_bbtmv_mul
 from special.utils import save_np_file_txt
 from special.hull2d import ConvexHull
 from special.spectre_params import find_params
+from special.visualisation import plot_cube_scatter
 import os
 
 
@@ -41,23 +43,23 @@ def init_grid(x1_bound=None,
 
 def init_operator(grid, volume, discret, distance, k, eps, kernel):
     dist_coef_1 = np.zeros(np.prod(discret)) + 0.0j
-    dist_coef_1[1:] = 3 / distance[1:] ** 2 - 3j * k / distance[1:] - k ** 2
+    dist_coef_1[1:] = (3 / (distance[1:] ** 2)) - ((3j * k) / distance[1:]) - (k ** 2)
     alpha = np.zeros((np.prod(discret), 3))
     alpha[1:, :] = (grid[0, :] - grid[1:, :]) / distance[1:].reshape(-1, 1)
     indexing_matrix = np.einsum('...kj,...ki->kij', alpha, alpha)
     part_1 = indexing_matrix * dist_coef_1.reshape(-1, 1, 1)
 
     dist_coef_2 = np.zeros(np.prod(discret)) + 0.0j
-    dist_coef_2[1:] = k ** 2 + 1j * k / distance[1:] - 1 / distance[1:] ** 2
+    dist_coef_2[1:] = (k ** 2) + ((1j * k) / distance[1:]) - (1 / (distance[1:] ** 2))
     part_2 = np.eye(3).reshape(-1, 3, 3) * dist_coef_2.reshape(-1, 1, 1)
 
     gr = np.zeros(np.prod(discret)) + 0.0j
     gr[1:] = kernel(distance[1:], k)
     result = gr.reshape(-1, 1, 1) * (part_1 + part_2) * volume.reshape(-1, 1)
-    eps = eps - np.eye(3).reshape(-1, 3, 3)
+    eps = eps.reshape(-1, 3, 3) - (np.eye(3).reshape(-1, 3, 3))
+    result[0, :] = (-1 / 3) * np.eye(3)
     result = np.einsum("...ij,...jk->...ik", result, eps)
-    result[0, :] = -1 / 3 * np.eye(3)
-    return result
+    return result, gr
 
 
 def operator(operator_array, vector_array, n, m, k):
@@ -212,6 +214,8 @@ class Em3dProblem:
         self.eps_on_grid = None  # Диэлектрическая проницаемость на сетке
         self.distance = None  # Массив расстояний от первой точки области до всех остальных
 
+        self.gr = None           # Коэффициенты Гельмгольца
+        self.oper_coeffs = None  # Коэффициенты матрицы
         self.prep_coeffs = None  # Подготовленные для быстрого умноженмя коэффициенты
         self.f_values = None  # Значения внешней волны
 
@@ -289,18 +293,19 @@ class Em3dProblem:
         self.distance = np.zeros(np.prod(self.n))
         self.distance[1:] = np.linalg.norm(self.grid[0, :] - self.grid[1:, :], axis=1)
 
-        oper_coeffs = init_operator(grid=self.grid,
-                                    volume=self.volume,
-                                    discret=self.n,
-                                    distance=self.distance,
-                                    k=self.k_0,
-                                    eps=self.eps_on_grid,
-                                    kernel=helm3d_kernel).reshape((-1, 9))
+        self.oper_coeffs, self.gr = init_operator(grid=self.grid,
+                                                  volume=self.volume,
+                                                  discret=self.n,
+                                                  distance=self.distance,
+                                                  k=self.k_0,
+                                                  eps=self.eps_on_grid,
+                                                  kernel=helm3d_kernel)
+        self.oper_coeffs = self.oper_coeffs.reshape((-1, 9))
 
         self.prep_coeffs = np.zeros((8 * np.prod(self.n), 9)) + 0.0j
         for rowcol in range(9):
-            self.prep_coeffs[:, rowcol] = prep_fftbbtensor(col_arr=oper_coeffs[:, rowcol],
-                                                           row_arr=oper_coeffs[:, rowcol],
+            self.prep_coeffs[:, rowcol] = prep_fftbbtensor(col_arr=self.oper_coeffs[:, rowcol],
+                                                           row_arr=self.oper_coeffs[:, rowcol],
                                                            n=int(self.n[0]),
                                                            m=int(self.n[1]),
                                                            k=int(self.n[2])).reshape((8 * np.prod(self.n),))
@@ -310,18 +315,22 @@ class Em3dProblem:
                                direction=np.array(self.direction),
                                amplitude=np.array(self.amplitude))
 
+
+
         print("fit completed")
         print(f"prep_coeffs shape is {self.prep_coeffs.shape}")
         print(f"wave shape is {self.f_values.shape}")
         return self
 
-    def compute_BiCGStab(self, save=True):
+    def compute_BiCGStab(self, max_iter=None, save=True):
+        if max_iter is None:
+            max_iter = 100
         print("BiCGStab method iterations:")
         self.result, self.rel_err_list, self.resid = \
             BiCGStab_EM3dprep(prep_oper_array=self.prep_coeffs,
                               vec_array=self.f_values,
                               u0_array=np.ones((np.prod(self.n), 3)) + 0.0j,
-                              n=self.n[0], m=self.n[1], k=self.n[2])
+                              n=self.n[0], m=self.n[1], k=self.n[2], max_iter=max_iter)
         if save:
             save_np_file_txt(np.array(self.result), os.path.join(self.path, "result_BiCGStab.txt"))
             save_np_file_txt(np.array(self.rel_err_list), os.path.join(self.path, "rel_err_list_BiCGStab.txt"))
@@ -330,16 +339,18 @@ class Em3dProblem:
 
         print("iterations is over")
 
-    def compute_GIM(self, mu_param=None, save=True):
+    def compute_GIM(self, mu_param=None, max_iter=None, save=True):
         if mu_param is None:
             mu_param = 1.0 + 0.0j
+        if max_iter is None:
+            max_iter = 100
         print("GIM method iterations:")
         self.result, self.rel_err_list, self.resid = \
             GIM_EM3dprep(prep_oper_array=self.prep_coeffs,
                          vec_array=self.f_values,
                          u0_array=np.ones((np.prod(self.n), 3)) + 0.0j,
                          mu_0=mu_param,
-                         n=self.n[0], m=self.n[1], k=self.n[2])
+                         n=self.n[0], m=self.n[1], k=self.n[2], max_iter=max_iter)
         if save:
             save_np_file_txt(np.array(self.result), os.path.join(self.path, "result_GIM.txt"))
             save_np_file_txt(np.array(self.rel_err_list), os.path.join(self.path, "rel_err_list_GIM.txt"))
@@ -350,20 +361,26 @@ class Em3dProblem:
 
     def compute_mu(self):
         result = np.sort(np.unique(self.eps_on_grid))
-        mu_0, radius = find_params(1/3 * result + 2/3)
+        mu_0, radius = find_params(result)
         return mu_0, radius
+
+    def plot_cube(self):
+        plot_cube_scatter(grid=self.grid,
+                          points=np.linalg.norm(self.result, axis=1),
+                          save_to=os.path.join(self.path, "wave_modulus.png"),
+                          show=False)
 
 
 if __name__ == "__main__":
     config = {
-        "exp_no": "exp10",
+        "exp_no": "exp14",
         "path": "C:\\Users\\qwert\\PycharmProjects\\SIEpy\\output",
-        "amplitude": [1.0, 1.0, 1.0],
-        "k_0": 0.5,
-        "n": [45, 45, 45],
+        "amplitude": [1.0, 0.0, 0.0],
+        "k_0": 4.25,
+        "n": [100, 100, 100],
         "length": [1.0, 1.0, 1.0],
         "center": [0.0, 0.0, 0.0],
-        "direction": [1.0, 1.0, 1.0],
+        "direction": [1.0, 0.0, 0.0],
         "eps": [
             {
                 "type": "step",
@@ -373,18 +390,18 @@ if __name__ == "__main__":
                 "eps_imag": [[0.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0]],
-                "x1_bounds": [-1.0, 0.0],
+                "x1_bounds": [-1.0, 1.0],
                 "x2_bounds": [-1.0, 1.0],
                 "x3_bounds": [-1.0, 1.0]
             },
             {
                 "type": "ellipsis",
-                "eps_real": [[5.0, 0.0, 0.0],
-                             [0.0, 6.0, 0.0],
-                             [0.0, 0.0, 7.0]],
-                "eps_imag": [[1.5, 0.0, 0.0],
-                             [0.0, 2.5, 0.0],
-                             [0.0, 0.0, 0.5]],
+                "eps_real": [[4.0, 0.0, 0.0],
+                             [0.0, 5.0, 0.0],
+                             [0.0, 0.0, 6.0]],
+                "eps_imag": [[0.0, 0.0, 0.0],
+                             [0.0, 0.0, 0.0],
+                             [0.0, 0.0, 0.0]],
                 "center": [0.0, 0.0, 0.0],
                 "radius": [0.5, 0.5, 0.5]
             }
@@ -392,7 +409,9 @@ if __name__ == "__main__":
     }
     test_obj = Em3dProblem()
     test_obj.fit(fit_config=config)
-    mu_0, R = test_obj.compute_mu()
+    #mu_0, R = test_obj.compute_mu()
+    print(test_obj.eps_on_grid)
+    print(test_obj.distance)
     test_obj.compute_BiCGStab()
-    test_obj.compute_GIM(mu_param=mu_0)
-
+    test_obj.plot_cube()
+    test_obj.compute_GIM(mu_param=2.0 + 0.0j)
