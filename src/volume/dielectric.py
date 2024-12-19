@@ -8,7 +8,7 @@ def step_dielectric_3d(grid: npt.NDArray[np.float64],
                        eps_imag: Iterable = None,
                        x1_bounds: Iterable = None,
                        x2_bounds: Iterable = None,
-                       x3_bounds: Iterable = None) -> npt.NDArray[np.complex128]:
+                       x3_bounds: Iterable = None) -> (npt.NDArray[np.complex128], npt.NDArray[bool]):
     """
     grid - Тензор (n, 3, 3) для каждой точки пространства
     eps_real
@@ -29,14 +29,14 @@ def step_dielectric_3d(grid: npt.NDArray[np.float64],
                (grid[:, 1] >= x2_bounds[0]) * (grid[:, 1] <= x2_bounds[1]) *
                (grid[:, 2] >= x3_bounds[0]) * (grid[:, 2] <= x3_bounds[1]))
     eps[indexes, :, :] = np.array(eps_real) + 1j * np.array(eps_imag)
-    return eps
+    return eps, indexes
 
 
 def ellipsis_dielectric_3d(grid: npt.NDArray[np.float64],
                            eps_real: Iterable = None,
                            eps_imag: Iterable = None,
                            center: Iterable = None,
-                           radius: Iterable = None) -> npt.NDArray[np.complex128]:
+                           radius: Iterable = None) -> (npt.NDArray[np.complex128], npt.NDArray[bool]):
     if eps_real is None:
         eps_real = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     if eps_imag is None:
@@ -52,7 +52,7 @@ def ellipsis_dielectric_3d(grid: npt.NDArray[np.float64],
         ((grid[:, 2] - center[2]) ** 2) / (radius[2] ** 2)
     ) <= 1
     eps[indexes, :, :] = np.array(eps_real) + 1j * np.array(eps_imag)
-    return eps
+    return eps, indexes
 
 
 def apply_dielectric_3d(grid,
@@ -85,20 +85,23 @@ def apply_dielectric_3d(grid,
         ]
 
     eps = np.zeros((grid.shape[0], 3, 3)) + 0j
+    indexes = np.zeros(grid.shape[0], dtype=bool)
     for num, element in enumerate(eps_vec):
         if element.get("type") == "step":
-            eps += step_dielectric_3d(grid=grid,
-                                      eps_real=element.get('eps_real'),
-                                      eps_imag=element.get('eps_imag'),
-                                      x1_bounds=element.get('x1_bounds'),
-                                      x2_bounds=element.get('x2_bounds'),
-                                      x3_bounds=element.get('x3_bounds'))
+            eps_d, indexes_d = step_dielectric_3d(grid=grid,
+                                                  eps_real=element.get('eps_real'),
+                                                  eps_imag=element.get('eps_imag'),
+                                                  x1_bounds=element.get('x1_bounds'),
+                                                  x2_bounds=element.get('x2_bounds'),
+                                                  x3_bounds=element.get('x3_bounds'))
         elif element.get("type") == "ellipsis":
-            eps += ellipsis_dielectric_3d(grid=grid,
-                                          eps_real=element.get('eps_real'),
-                                          eps_imag=element.get('eps_imag'),
-                                          center=element.get('center'),
-                                          radius=element.get('radius'))
+            eps_d, indexes_d = ellipsis_dielectric_3d(grid=grid,
+                                                      eps_real=element.get('eps_real'),
+                                                      eps_imag=element.get('eps_imag'),
+                                                      center=element.get('center'),
+                                                      radius=element.get('radius'))
         else:
             continue
-    return eps
+        indexes += indexes_d
+        eps += eps_d
+    return eps, indexes

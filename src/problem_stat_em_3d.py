@@ -57,26 +57,27 @@ def init_operator(grid, volume, discret, distance, k, eps, kernel):
     gr[1:] = kernel(distance[1:], k)
     result = gr.reshape(-1, 1, 1) * (part_1 + part_2) * volume.reshape(-1, 1)
     eps = eps.reshape(-1, 3, 3) - (np.eye(3).reshape(-1, 3, 3))
-    result[0, :] = (-1 / 3) * np.eye(3)
-    result = np.einsum("...ij,...jk->...ik", result, eps)
-    return result, gr
+    result[0, :, :] = -(1 / 3) * np.eye(3)
+    return result, gr, eps
 
 
-def operator(operator_array, vector_array, n, m, k):
+def operator(operator_array, vector_array, eps, n, m, k):
     result = np.zeros((n * m * k, 3)) + 0.0j
+    vec_array = np.einsum("...ijk,...ij->...ik", eps, vector_array)
     for col in range(3):
         res = prep_fbbtmv(prep_fft_arr=operator_array[:, col].reshape((2 * n, 2 * m, 2 * k)),
-                          vec_arr=vector_array[:, col].reshape((n, m, k)),
+                          vec_arr=vec_array[:, col].reshape((n, m, k)),
                           n=n, m=m, k=k).reshape((-1,))
         result[:, 0] += res
     for col in range(3):
         result[:, 1] += prep_fbbtmv(prep_fft_arr=operator_array[:, 3 + col].reshape((2 * n, 2 * m, 2 * k)),
-                                    vec_arr=vector_array[:, col].reshape((n, m, k)),
+                                    vec_arr=vec_array[:, col].reshape((n, m, k)),
                                     n=n, m=m, k=k).reshape((-1,))
     for col in range(3):
         result[:, 2] += prep_fbbtmv(prep_fft_arr=operator_array[:, 6 + col].reshape((2 * n, 2 * m, 2 * k)),
-                                    vec_arr=vector_array[:, col].reshape((n, m, k)),
+                                    vec_arr=vec_array[:, col].reshape((n, m, k)),
                                     n=n, m=m, k=k).reshape((-1,))
+
     result = vector_array - result
     return result
 
@@ -116,7 +117,7 @@ def GIM_EM3dprep(prep_oper_array, vec_array, u0_array=None,
     return u, rel_error_list, residual_list
 
 
-def BiCGStab_EM3dprep(prep_oper_array, vec_array, u0_array=None,
+def BiCGStab_EM3dprep(prep_oper_array, vec_array, u0_array=None, eps=None,
                       n=None, m=None, k=None,
                       rtol=1e-8, max_iter=1000):
     """
@@ -143,7 +144,7 @@ def BiCGStab_EM3dprep(prep_oper_array, vec_array, u0_array=None,
     else:
         u = u0_array.astype(np.complex128).copy()
 
-    r = vec_array - operator(prep_oper_array, u, n, m, k)
+    r = vec_array - operator(prep_oper_array, u, eps, n, m, k)
     r_hat = r.copy()
     rho_old = alpha = omega_old = 1 + 0j
     v = np.zeros((n * m * k, 3), dtype=np.complex128)
@@ -164,7 +165,7 @@ def BiCGStab_EM3dprep(prep_oper_array, vec_array, u0_array=None,
             beta = (rho_new / rho_old) * (alpha / omega_old)
             p = r + beta * (p - omega_old * v)
 
-        v = operator(prep_oper_array, p, n, m, k)
+        v = operator(prep_oper_array, p, eps, n, m, k)
         sigma = np.einsum('...ij,...ij', r_hat.conj(), v)
         if sigma == 0:
             print("Breakdown: sigma == 0")
@@ -172,7 +173,7 @@ def BiCGStab_EM3dprep(prep_oper_array, vec_array, u0_array=None,
 
         alpha = rho_new / sigma
         s = r - alpha * v
-        t = operator(prep_oper_array, s, n, m, k)
+        t = operator(prep_oper_array, s, eps, n, m, k)
         t_norm = np.einsum('...ij,...ij', t.conj(), t)
         if t_norm == 0:
             omega_new = 0
@@ -184,7 +185,7 @@ def BiCGStab_EM3dprep(prep_oper_array, vec_array, u0_array=None,
 
         rel_error = np.linalg.norm(np.linalg.norm(u - u0_array, axis=1)) / f_norm
         rel_error_list.append(rel_error)
-        residual = np.linalg.norm(np.linalg.norm(operator(prep_oper_array, u, n, m ,k) - vec_array, axis=1))
+        residual = np.linalg.norm(np.linalg.norm(operator(prep_oper_array, u, eps, n, m, k) - vec_array, axis=1))
         residual_list.append(residual)
         print(f"iter {iter},\t rel_error is {round(rel_error, 8)}, \t system residual is {round(residual, 8)}")
         if rel_error < rtol:
@@ -214,6 +215,7 @@ class Em3dProblem:
         self.eps_on_grid = None  # Диэлектрическая проницаемость на сетке
         self.distance = None  # Массив расстояний от первой точки области до всех остальных
 
+        self.in_Q = None    # Логический массив принадлежности области
         self.gr = None           # Коэффициенты Гельмгольца
         self.oper_coeffs = None  # Коэффициенты матрицы
         self.prep_coeffs = None  # Подготовленные для быстрого умноженмя коэффициенты
@@ -228,7 +230,7 @@ class Em3dProblem:
             self.config = {
                 "exp_no": "exp1",
                 "path": "output/",
-                "amplitude": [1.0, 0.0, 0.0],
+                "amplitude": [0.0, 1.0, 0.0],
                 "k_0": 1.0,
                 "n": [20, 30, 40],
                 "length": [1.0, 1.0, 1.0],
@@ -288,18 +290,18 @@ class Em3dProblem:
                                            x3_bound=x3_bound,
                                            discret=self.n)
 
-        self.eps_on_grid = apply_dielectric_3d(self.grid, self.eps)
+        self.eps_on_grid, self.in_Q = apply_dielectric_3d(self.grid, self.eps)
 
         self.distance = np.zeros(np.prod(self.n))
         self.distance[1:] = np.linalg.norm(self.grid[0, :] - self.grid[1:, :], axis=1)
 
-        self.oper_coeffs, self.gr = init_operator(grid=self.grid,
-                                                  volume=self.volume,
-                                                  discret=self.n,
-                                                  distance=self.distance,
-                                                  k=self.k_0,
-                                                  eps=self.eps_on_grid,
-                                                  kernel=helm3d_kernel)
+        self.oper_coeffs, self.gr, self.eps_on_grid = init_operator(grid=self.grid,
+                                                                  volume=self.volume,
+                                                                  discret=self.n,
+                                                                  distance=self.distance,
+                                                                  k=self.k_0,
+                                                                  eps=self.eps_on_grid,
+                                                                  kernel=helm3d_kernel)
         self.oper_coeffs = self.oper_coeffs.reshape((-1, 9))
 
         self.prep_coeffs = np.zeros((8 * np.prod(self.n), 9)) + 0.0j
@@ -330,14 +332,29 @@ class Em3dProblem:
             BiCGStab_EM3dprep(prep_oper_array=self.prep_coeffs,
                               vec_array=self.f_values,
                               u0_array=np.ones((np.prod(self.n), 3)) + 0.0j,
+                              eps=self.eps_on_grid,
                               n=self.n[0], m=self.n[1], k=self.n[2], max_iter=max_iter)
         if save:
             save_np_file_txt(np.array(self.result), os.path.join(self.path, "result_BiCGStab.txt"))
             save_np_file_txt(np.array(self.rel_err_list), os.path.join(self.path, "rel_err_list_BiCGStab.txt"))
             save_np_file_txt(np.array(self.resid), os.path.join(self.path, "resid_list_BiCGStab.txt"))
             print(f"Results of iterations saved in {self.path}")
-
         print("iterations is over")
+
+    def compute_RCS(self, n_phi):
+        epsilon = 1e-6
+        angles = np.linspace(-np.pi+epsilon, np.pi-epsilon, n_phi)
+        vectors = np.hstack([
+            np.cos(angles).reshape((n_phi, 1)),
+            np.zeros((n_phi, 1)),
+            np.sin(angles).reshape((n_phi, 1)),
+        ])
+        s_q = np.einsum('...ijk,...il->...ij', self.eps_on_grid-np.eye(3).reshape(-1, 3, 3), self.result)
+        cross_matrix_e_r = np.einsum("...ij,...kj->...ik", self.grid, vectors)
+        waves = np.exp(1j * self.k_0 * cross_matrix_e_r) * (self.in_Q.reshape(-1, 1) * self.volume)
+        result = np.einsum('...ij,...ik->jk', waves, s_q)
+        result = (self.k_0**4) / (16 * np.pi**2) * np.power(np.linalg.norm(np.cross(vectors, result), 2, axis=1), 2)
+        return result, angles
 
     def compute_GIM(self, mu_param=None, max_iter=None, save=True):
         if mu_param is None:
@@ -373,12 +390,12 @@ class Em3dProblem:
 
 if __name__ == "__main__":
     config = {
-        "exp_no": "exp14",
+        "exp_no": "experiment_k_2.5",
         "path": "C:\\Users\\qwert\\PycharmProjects\\SIEpy\\output",
-        "amplitude": [1.0, 0.0, 0.0],
-        "k_0": 4.25,
-        "n": [100, 100, 100],
-        "length": [1.0, 1.0, 1.0],
+        "amplitude": [0.0, 1.0, 0.0],
+        "k_0": 1.25,
+        "n": [40, 40, 40],
+        "length": [2.0, 2.0, 2.0],
         "center": [0.0, 0.0, 0.0],
         "direction": [1.0, 0.0, 0.0],
         "eps": [
@@ -390,28 +407,34 @@ if __name__ == "__main__":
                 "eps_imag": [[0.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0]],
-                "x1_bounds": [-1.0, 1.0],
-                "x2_bounds": [-1.0, 1.0],
-                "x3_bounds": [-1.0, 1.0]
+                "x1_bound": [-5.0, 5.0],
+                "x2_bound": [-5.0, 5.0],
+                "x3_bound": [-5.0, 5.0]
             },
             {
                 "type": "ellipsis",
-                "eps_real": [[4.0, 0.0, 0.0],
-                             [0.0, 5.0, 0.0],
-                             [0.0, 0.0, 6.0]],
+                "eps_real": [[2.56, 0.0, 0.0],
+                             [0.0, 2.56, 0.0],
+                             [0.0, 0.0, 2.56]],
                 "eps_imag": [[0.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0]],
                 "center": [0.0, 0.0, 0.0],
-                "radius": [0.5, 0.5, 0.5]
+                "radius": [1.0, 1.0, 1.0]
             }
         ]
     }
     test_obj = Em3dProblem()
     test_obj.fit(fit_config=config)
-    #mu_0, R = test_obj.compute_mu()
     print(test_obj.eps_on_grid)
     print(test_obj.distance)
-    test_obj.compute_BiCGStab()
+    test_obj.compute_BiCGStab(max_iter=200)
     test_obj.plot_cube()
-    test_obj.compute_GIM(mu_param=2.0 + 0.0j)
+    rcs, theta = test_obj.compute_RCS(n_phi=300)
+
+    plt.figure(figsize=(9, 6), dpi=100)
+    plt.polar(theta, np.abs(rcs)/max(np.abs(rcs)), label="Abs")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
